@@ -1,10 +1,15 @@
 using System;
 using System.Reflection;
+using System.Linq;
+using System.Collections;
 
 using Aki.Reflection.Patching;
+using Aki.Reflection.Utils;
 
 using EFT.InventoryLogic;
 using EFT;
+
+using HarmonyLib;
 
 namespace Gaylatea
 {
@@ -16,25 +21,68 @@ namespace Gaylatea
         /// </summary>
         class MakeFoodMedsUsablePatch : ModulePatch
         {
+            private static Type _playerActionClassType;
+            private static Type _menuClassType;
+            private static Type _menuItemClassType;
+            private static Type _stringLocalizeType;
+
+            private static FieldInfo _menuItemNameField;
+            private static FieldInfo _menuItemActionField;
+            private static FieldInfo _menuActionsField;
+
+            private static MethodInfo _localizedMethod;
+
             protected override MethodBase GetTargetMethod()
             {
-                return typeof(GClass1766).GetMethod("smethod_4", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                _playerActionClassType = PatchConstants.EftTypes.Single(x => x.GetMethod("GetAvailableActions") != null);
+                _menuClassType = PatchConstants.EftTypes.Single(x => x.GetMethod("SelectNextAction") != null);
+                _menuItemClassType = PatchConstants.EftTypes.Single(x => x.GetField("TargetName") != null && x.GetField("Disabled") != null);
+                _stringLocalizeType = PatchConstants.EftTypes.Single(x => x.GetMethod("LocalizeAreaName") != null);
+
+                _menuItemNameField = AccessTools.Field(_menuItemClassType, "Name");
+                _menuItemActionField = AccessTools.Field(_menuItemClassType, "Action");
+                _menuActionsField = AccessTools.Field(_menuClassType, "Actions");
+
+                _localizedMethod = AccessTools.Method(_stringLocalizeType, "Localized", new Type[] { typeof(string), typeof(string) });
+
+                // Find the method to hook to by its parameter names, instead of method name, incase BSG adds more methods
+                return AccessTools.GetDeclaredMethods(_playerActionClassType).FirstOrDefault(IsTargetMethod);
+            }
+
+            private static bool IsTargetMethod(MethodInfo mi)
+            {
+                var parameters = mi.GetParameters();
+                return parameters.Length > 3
+                    && parameters[0].Name == "owner"
+                    && parameters[1].Name == "rootItem"
+                    && parameters[2].Name == "lootItemOwner";
             }
 
             [PatchPostfix]
-            public static void PatchPostfix(ref GClass2645 __result, Item rootItem, GamePlayerOwner owner)
+            public static void PatchPostfix(ref object __result, Item rootItem, GamePlayerOwner owner)
             {
                 if(!(rootItem is MedsClass) && !(rootItem is FoodClass)) {
                     return;
                 }
 
-                var @class = new FoodMedUser();
-                @class.owner = owner;
-                @class.item = rootItem;
-                __result.Actions.Add(new GClass2644{
-                    Name = "Use".Localized(null),
-                    Action = new Action(@class.UseAll),
-                });
+                // We can access a List<Type> as a generic list using IList
+                IList menuItems = _menuActionsField.GetValue(__result) as IList;
+
+                var actionHandler = new FoodMedUser
+                {
+                    owner = owner,
+                    item = rootItem
+                };
+
+                // We can create an instance of a compile time unknown type using Activator
+                object searchMenuItem = Activator.CreateInstance(_menuItemClassType, new object[] { });
+
+                // And then use FieldInfo objects to populate its
+                _menuItemNameField.SetValue(searchMenuItem, _localizedMethod.Invoke(null, new object[] { "Use", null }));
+                _menuItemActionField.SetValue(searchMenuItem, new Action(actionHandler.UseAll));
+
+                // And because our list is generic, we can just add into it like normal
+                menuItems.Add(searchMenuItem);
             }
         }
 
